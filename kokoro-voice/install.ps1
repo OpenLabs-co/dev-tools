@@ -40,7 +40,7 @@ function Say($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Warn($msg) { Write-Host "warning: $msg" -ForegroundColor Yellow }
 function Die($msg) { Write-Host "error: $msg" -ForegroundColor Red; exit 1 }
 
-# ── 1. Preflight ─────────────────────────────────────────────────────────────
+# --- 1. Preflight ---
 if ($env:OS -ne 'Windows_NT') { Die 'This installer is for Windows. On macOS use install.sh.' }
 
 # Find Python 3.10+. Skips the Microsoft Store "python" stub, which prints nothing useful.
@@ -54,7 +54,9 @@ foreach ($c in $candidates) {
     try {
         $ok = & $c[0] @($c[1..($c.Count)] | Where-Object { $_ }) -c 'import sys; print(sys.version_info >= (3, 10))' 2>$null
         if ($ok -eq 'True') { $Py = $c; break }
-    } catch { }
+    } catch {
+        Write-Verbose "Skipping $($c -join ' '): $_"   # not a usable Python; try the next one
+    }
 }
 if (-not $Py) { Die 'Python 3.10 or later is required. Install it with: winget install Python.Python.3.12' }
 $PyArgs = @($Py[1..($Py.Count)] | Where-Object { $_ })
@@ -66,7 +68,7 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
 
 New-Item -ItemType Directory -Force -Path $Dest, (Join-Path $Dest 'queue'), $Bin | Out-Null
 
-# ── 2. Kit files (from a local checkout when run from one, else from GitHub) ─
+# --- 2. Kit files (from a local checkout when run from one, else from GitHub) ---
 $Here = if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'speak.py'))) { $PSScriptRoot } else { $null }
 Say "Installing kit files into $Dest"
 foreach ($f in @('speak.py', 'ttsd_win.py', 'uninstall.ps1')) {
@@ -75,7 +77,7 @@ foreach ($f in @('speak.py', 'ttsd_win.py', 'uninstall.ps1')) {
     else { Invoke-WebRequest -UseBasicParsing -Uri "$Raw/$f" -OutFile $target }
 }
 
-# ── 3. Python environment + Kokoro ───────────────────────────────────────────
+# --- 3. Python environment + Kokoro ---
 $VenvPy = Join-Path $Dest 'venv\Scripts\python.exe'
 if (-not (Test-Path $VenvPy)) {
     Say 'Creating a Python environment'
@@ -100,7 +102,7 @@ foreach ($name in $Models.Keys) {
     Move-Item "$path.part" $path -Force
 }
 
-# ── 4. Claude Code hooks (merged, never replaced) ────────────────────────────
+# --- 4. Claude Code hooks (merged, never replaced) ---
 # Exec form (command + args): no shell runs, so it works the same whether Claude
 # Code uses Git Bash or PowerShell, and no "~" has to expand. -X utf8 because
 # hook input is UTF-8.
@@ -140,7 +142,7 @@ $fwd = { param($p) $p -replace '\\', '/' }
 if ($LASTEXITCODE -ne 0) { Die "Could not update $Settings (is it valid JSON?)." }
 Remove-Item $mergeFile -Force
 
-# ── 5. `tts` and `shh` commands ──────────────────────────────────────────────
+# --- 5. `tts` and `shh` commands ---
 $Pyw = Join-Path $Dest 'venv\Scripts\python.exe'
 Set-Content -Path (Join-Path $Bin 'tts.cmd') -Encoding ASCII -Value @"
 @echo off
@@ -167,7 +169,7 @@ if (-not (($userPath -split ';') -contains $Bin)) {
 if ($VoiceOff) { Remove-Item (Join-Path $Claude 'tts-on') -ErrorAction SilentlyContinue }
 else { New-Item -ItemType File -Force -Path (Join-Path $Claude 'tts-on') | Out-Null }
 
-# ── 6. Optional: global hotkeys ──────────────────────────────────────────────
+# --- 6. Optional: global hotkeys ---
 if ($Hotkeys) {
     $pythonw = Join-Path $Dest 'venv\Scripts\pythonw.exe'
     $ttsd = Join-Path $Dest 'ttsd_win.py'
@@ -183,7 +185,7 @@ CreateObject("WScript.Shell").Run """$pythonw"" ""$ttsd""", 0, False
     Say 'Hotkeys are on: Ctrl+Alt+T on/off, Ctrl+Alt+S stop, Ctrl+Alt+N skip, Ctrl+Alt+R newest reply, Ctrl+Alt+V read the clipboard'
 }
 
-# ── 7. Done ──────────────────────────────────────────────────────────────────
+# --- 7. Done ---
 if (-not $NoTest) {
     Say 'Speaking a test line'
     'Kokoro voice is installed.' | & $VenvPy -X utf8 (Join-Path $Dest 'speak.py') read

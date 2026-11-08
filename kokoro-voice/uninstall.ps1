@@ -22,16 +22,16 @@ if (Test-Path $Settings) {
     Copy-Item $Settings "$Settings.bak-kokoro-uninstall-$(Get-Date -Format yyyyMMdd-HHmmss)"
     $json = Get-Content $Settings -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($json.hooks) {
-        foreach ($event in @($json.hooks.PSObject.Properties.Name)) {
+        foreach ($evt in @($json.hooks.PSObject.Properties.Name)) {
             $kept = @()
-            foreach ($group in @($json.hooks.$event)) {
+            foreach ($group in @($json.hooks.$evt)) {
                 $group.hooks = @($group.hooks | Where-Object {
                     $blob = ("$($_.command) " + (@($_.args) -join ' ')) -replace '\\', '/'
                     $blob -notlike '*tts/speak.py*'
                 })
                 if ($group.hooks.Count -gt 0) { $kept += $group }
             }
-            if ($kept.Count -gt 0) { $json.hooks.$event = $kept } else { $json.hooks.PSObject.Properties.Remove($event) }
+            if ($kept.Count -gt 0) { $json.hooks.$evt = $kept } else { $json.hooks.PSObject.Properties.Remove($evt) }
         }
         if (@($json.hooks.PSObject.Properties).Count -eq 0) { $json.PSObject.Properties.Remove('hooks') }
     }
