@@ -16,14 +16,18 @@ Modes:
   speak.py player   Internal: drain the queue
   speak.py say      Speak text from stdin, no title (testing)
   speak.py read     Speak text from stdin NOW (iTerm right-click "Read selection")
-  speak.py last-tty /dev/ttysNNN   Speak the last reply of the Claude session in that tab
+  speak.py last-tty /dev/ttysNNN   Speak the last reply of the Claude session in that tab (macOS/Linux)
+  speak.py last     Speak the newest reply from any Claude session
+  speak.py clip     Speak whatever text is on the clipboard (copy a selection, then run this)
+
+Runs on macOS and Windows. macOS plays audio with afplay; Windows with the
+built-in winsound module. Paths are the same: ~/.claude/tts on both.
 
 Toggle: replies are only queued while ~/.claude/tts-on exists.
 Config (env vars): KOKORO_VOICE (af_heart), KOKORO_SPEED (1.1),
 KOKORO_MAX_CHARS (1200), KOKORO_PLAN_MAX_CHARS (8000), KOKORO_ANNOUNCE (1 = say the session title)
 """
 
-import fcntl
 import json
 import os
 import re
@@ -34,6 +38,18 @@ import tempfile
 import time
 from pathlib import Path
 
+IS_WIN = sys.platform == "win32"
+if IS_WIN:
+    import msvcrt
+    import threading
+    import winsound
+    # Hook input and transcripts are UTF-8; Windows Python defaults to the ANSI
+    # code page. pythonw has no stdin at all, hence the guard.
+    if sys.stdin is not None:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+else:
+    import fcntl
+
 HERE = Path(__file__).resolve().parent
 TOGGLE = Path.home() / ".claude" / "tts-on"
 QUEUE = HERE / "queue"
@@ -41,7 +57,8 @@ LOCK = HERE / "player.lock"
 PLAYING = HERE / "playing.json"
 LAST = HERE / "last.json"
 MIC = HERE / "mic-active"
-PYTHON = HERE / "venv" / "bin" / "python"
+# pythonw on Windows so the background player never opens a console window.
+PYTHON = HERE / "venv" / ("Scripts/pythonw.exe" if IS_WIN else "bin/python")
 
 VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
 SPEED = float(os.environ.get("KOKORO_SPEED", "1.1"))
@@ -79,7 +96,7 @@ def read_transcript(path: str | None) -> tuple[str, str]:
     if not path or not os.path.exists(path):
         return "", ""
     last, ai_title, custom_title = "", "", ""
-    with open(path) as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if '"assistant"' not in line and 'Title"' not in line:
                 continue
@@ -112,12 +129,23 @@ def spoken_title(title: str, cwd: str | None) -> str:
 
 def kill_player() -> None:
     try:
-        pgid = int(json.loads(PLAYING.read_text())["pgid"])
-        os.killpg(pgid, signal.SIGTERM)
-        for _ in range(40):  # wait for it to exit so its queue lock is free
-            time.sleep(0.05)
-            os.killpg(pgid, 0)
-    except (FileNotFoundError, ValueError, KeyError, ProcessLookupError, PermissionError):
+        info = json.loads(PLAYING.read_text())
+    except (FileNotFoundError, ValueError):
+        PLAYING.unlink(missing_ok=True)
+        return
+    try:
+        if IS_WIN:
+            # TerminateProcess; the audio dies with it (winsound plays in-process),
+            # and Windows releases the queue lock when the process ends.
+            os.kill(int(info["pid"]), signal.SIGTERM)
+            time.sleep(0.2)
+        else:
+            pgid = int(info["pgid"])
+            os.killpg(pgid, signal.SIGTERM)
+            for _ in range(40):  # wait for it to exit so its queue lock is free
+                time.sleep(0.05)
+                os.killpg(pgid, 0)
+    except (ValueError, KeyError, ProcessLookupError, PermissionError, OSError):
         pass
     PLAYING.unlink(missing_ok=True)
 
@@ -126,8 +154,23 @@ def ensure_player() -> None:
     subprocess.Popen(
         [str(PYTHON), str(Path(__file__).resolve()), "player"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **detached(),
     )
+
+
+def detached() -> dict:
+    """Popen kwargs that let the player outlive the hook that started it."""
+    if IS_WIN:
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        return {"creationflags": flags, "close_fds": True}
+    return {"start_new_session": True}
+
+
+def chime(on: bool) -> None:
+    if IS_WIN:
+        winsound.MessageBeep(winsound.MB_OK if on else winsound.MB_ICONHAND)
+    else:
+        subprocess.run(["afplay", "/System/Library/Sounds/" + ("Tink.aiff" if on else "Pop.aiff")])
 
 
 def queued(session: str | None = None) -> list[Path]:
@@ -179,7 +222,7 @@ def plan() -> None:
             plans = sorted((Path.home() / ".claude" / "plans").glob("*.md"), key=lambda f: f.stat().st_mtime)
             path = plans[-1] if plans and time.time() - plans[-1].stat().st_mtime < 3600 else None
         try:
-            body = Path(path).read_text() if path else ""
+            body = Path(path).read_text(encoding="utf-8", errors="replace") if path else ""
         except OSError:
             body = ""
     # Headings and bullets have no closing punctuation; give each a pause.
@@ -227,10 +270,10 @@ def toggle() -> None:
     if TOGGLE.exists():
         TOGGLE.unlink()
         shh()
-        subprocess.run(["afplay", "/System/Library/Sounds/Pop.aiff"])
+        chime(False)
     else:
         TOGGLE.touch()
-        subprocess.run(["afplay", "/System/Library/Sounds/Tink.aiff"])
+        chime(True)
 
 
 def replay() -> None:
@@ -262,6 +305,25 @@ def mic_busy() -> bool:
         return False
 
 
+class _Thread:
+    """Gives a playback thread the same .wait() as a Popen."""
+
+    def __init__(self, thread):
+        self.thread = thread
+
+    def wait(self):
+        self.thread.join()
+
+
+def play_async(wav: Path):
+    """Start playing a wav and return something with .wait()."""
+    if IS_WIN:
+        t = threading.Thread(target=winsound.PlaySound, args=(str(wav), winsound.SND_FILENAME), daemon=True)
+        t.start()
+        return _Thread(t)
+    return subprocess.Popen(["afplay", str(wav)])
+
+
 def synth_and_play(kokoro, text: str) -> None:
     import soundfile as sf
 
@@ -286,7 +348,7 @@ def synth_and_play(kokoro, text: str) -> None:
             sf.write(wav, samples, rate)
             if player:
                 player.wait()
-            player = subprocess.Popen(["afplay", str(wav)])
+            player = play_async(wav)
         if player:
             player.wait()
     finally:
@@ -301,16 +363,51 @@ def load_kokoro():
     return Kokoro(str(HERE / "kokoro-v1.0.int8.onnx"), str(HERE / "voices-v1.0.bin"))
 
 
+def lock_nb(fh) -> None:
+    """Non-blocking exclusive lock; raises if another player holds it."""
+    if IS_WIN:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def unlock(fh) -> None:
+    if IS_WIN:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def acquire(fh, seconds: float = 4.0) -> bool:
+    """Take the queue lock, waiting briefly for a player that is being stopped.
+
+    A stopped player can take a moment to die (longer on a busy machine). Giving
+    up at once would strand whatever was queued behind it, because the dying
+    player never looks at the queue again. A healthy player keeps the lock, so
+    this only costs a few seconds of a redundant process.
+    """
+    deadline = time.time() + seconds
+    while True:
+        try:
+            lock_nb(fh)
+            return True
+        except (BlockingIOError, OSError):
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.1)
+
+
 def player() -> None:
     QUEUE.mkdir(exist_ok=True)
     lock = open(LOCK, "w")
     kokoro = None
     while True:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not acquire(lock):
             return  # another player is already draining the queue
-        signal.signal(signal.SIGTERM, lambda *_: (PLAYING.unlink(missing_ok=True), os._exit(0)))
+        if not IS_WIN:  # Windows ends the process outright; kill_player tidies up instead
+            signal.signal(signal.SIGTERM, lambda *_: (PLAYING.unlink(missing_ok=True), os._exit(0)))
         while items := queued():
             if mic_busy():  # you're dictating; wait until the mic closes
                 time.sleep(0.3)
@@ -323,12 +420,16 @@ def player() -> None:
                 continue
             path.unlink(missing_ok=True)
             LAST.write_text(json.dumps(item))
-            PLAYING.write_text(json.dumps({"pgid": os.getpgid(0), "session": item["session"]}))
+            PLAYING.write_text(json.dumps({
+                "pid": os.getpid(),
+                "pgid": None if IS_WIN else os.getpgid(0),
+                "session": item["session"],
+            }))
             kokoro = kokoro or load_kokoro()
             text = f"From {item['title']}. {item['text']}" if ANNOUNCE and item.get("title") else item["text"]
             synth_and_play(kokoro, text)
         PLAYING.unlink(missing_ok=True)
-        fcntl.flock(lock, fcntl.LOCK_UN)
+        unlock(lock)
         # A reply may have been queued between our last check and the unlock,
         # while its hook's player saw the lock held and gave up. Re-check.
         if not queued():
@@ -382,6 +483,28 @@ def last_tty() -> None:
     play_now(clean(text, READ_MAX_CHARS) if text else "There's no Claude reply in this tab yet.")
 
 
+def last() -> None:
+    """The newest reply from any session (Windows has no tab-to-session link)."""
+    transcripts = sorted(PROJECTS.glob("*/*.jsonl"), key=lambda f: f.stat().st_mtime)
+    text, _ = read_transcript(str(transcripts[-1])) if transcripts else ("", "")
+    play_now(clean(text, READ_MAX_CHARS) if text else "There's no Claude reply yet.")
+
+
+def clipboard_text() -> str:
+    if IS_WIN:
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"]
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        out = subprocess.run(["pbpaste"], capture_output=True, text=True)
+    return out.stdout or ""
+
+
+def clip() -> None:
+    """Read the clipboard aloud: the Windows stand-in for "Read Selection Aloud"."""
+    play_now(clean(terminal_text(clipboard_text()), READ_MAX_CHARS))
+
+
 def say() -> None:
     text = sys.stdin.read().strip()
     if text:
@@ -393,5 +516,5 @@ if __name__ == "__main__":
     {
         "hook": hook, "plan": plan, "prompt": prompt, "shh": shh, "skip": skip, "toggle": toggle,
         "replay": replay, "mic-on": mic_on, "mic-off": mic_off, "player": player, "say": say,
-        "read": read, "last-tty": last_tty,
+        "read": read, "last-tty": last_tty, "last": last, "clip": clip,
     }[mode]()

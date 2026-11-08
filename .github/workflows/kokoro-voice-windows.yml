@@ -1,0 +1,116 @@
+name: kokoro-voice (Windows)
+
+on:
+  push:
+    paths: ['kokoro-voice/**', '.github/workflows/kokoro-voice-windows.yml']
+  pull_request:
+    paths: ['kokoro-voice/**']
+  workflow_dispatch:
+
+jobs:
+  install:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh, powershell]   # PowerShell 7 and Windows PowerShell 5.1
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Seed a settings.json that already has someone else's hook
+        run: |
+          New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude" | Out-Null
+          '{ "model": "opus", "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "echo other-stop-hook" } ] } ] } }' |
+            Set-Content "$env:USERPROFILE\.claude\settings.json" -Encoding UTF8
+
+      - name: Install (from the checkout), with hotkeys
+        env:
+          KOKORO_VOICE_NO_START: '1'
+        run: ./kokoro-voice/install.ps1 -Hotkeys -NoTest
+
+      - name: Re-run the installer (must not duplicate hooks)
+        run: ./kokoro-voice/install.ps1 -NoTest
+
+      - name: Check the hooks
+        run: |
+          $s = Get-Content "$env:USERPROFILE\.claude\settings.json" -Raw | ConvertFrom-Json
+          $stop = @($s.hooks.Stop)
+          if ($stop.Count -ne 2) { throw "expected 2 Stop groups (theirs + ours), got $($stop.Count)" }
+          if ($stop[0].hooks[0].command -ne 'echo other-stop-hook') { throw 'the existing hook was not kept first' }
+          $ours = $stop[1].hooks[0]
+          if (-not (Test-Path $ours.command)) { throw "hook command is not a real path: $($ours.command)" }
+          if ($ours.args[-1] -ne 'hook') { throw 'Stop hook does not run speak.py hook' }
+          if (@($s.hooks.UserPromptSubmit).Count -ne 1) { throw 'UserPromptSubmit hook missing or duplicated' }
+          if ($s.hooks.PreToolUse[0].matcher -ne 'ExitPlanMode') { throw 'ExitPlanMode hook missing' }
+          if (-not (Test-Path "$env:USERPROFILE\.claude\tts-on")) { throw 'voice was not switched on' }
+          $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'kokoro-voice-hotkeys.vbs'
+          if (-not (Test-Path $startup)) { throw 'hotkey launcher was not added to Startup' }
+          Write-Host 'hooks OK'
+
+      - name: Kokoro synthesizes speech on Windows
+        run: |
+          $py = "$env:USERPROFILE\.claude\tts\venv\Scripts\python.exe"
+          & $py -X utf8 -c "import sys; sys.path.insert(0, r'$env:USERPROFILE\.claude\tts'); sys.argv=['x']; import speak; k = speak.load_kokoro(); s, r = k.create('Kokoro on Windows. Ünïcödé too.', voice='af_heart', speed=1.1, lang='en-us'); assert len(s) > 10000 and r == 24000, (len(s), r); print('synth OK', len(s), r)"
+          if ($LASTEXITCODE -ne 0) { throw 'synthesis failed' }
+
+      - name: Run the Stop hook exactly as Claude Code would (exec form)
+        run: |
+          $s = Get-Content "$env:USERPROFILE\.claude\settings.json" -Raw | ConvertFrom-Json
+          $h = $s.hooks.Stop[1].hooks[0]
+          $payload = '{"session_id":"ci-session","cwd":"C:/work/demo","hook_event_name":"Stop","last_assistant_message":"The build passed on Windows. Café ✓"}'
+          $payload | & $h.command @($h.args)
+          if ($LASTEXITCODE -ne 0) { throw "hook exited $LASTEXITCODE" }
+          # The player picks the item up, records it as the last reply, and drains the queue.
+          $last = "$env:USERPROFILE\.claude\tts\last.json"
+          for ($i = 0; $i -lt 90 -and -not (Test-Path $last); $i++) { Start-Sleep 1 }
+          if (-not (Test-Path $last)) { throw 'the player never picked up the reply' }
+          $item = Get-Content $last -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($item.text -notlike '*build passed on Windows*') { throw "unexpected text: $($item.text)" }
+          if ($item.title -ne 'demo') { throw "unexpected title: $($item.title)" }
+          for ($i = 0; $i -lt 60 -and @(Get-ChildItem "$env:USERPROFILE\.claude\tts\queue\*.json").Count -gt 0; $i++) { Start-Sleep 1 }
+          Write-Host "hook -> queue -> player OK: $($item.text)"
+
+      - name: shh, clip and tts.cmd
+        run: |
+          $py = "$env:USERPROFILE\.claude\tts\venv\Scripts\python.exe"
+          $sp = "$env:USERPROFILE\.claude\tts\speak.py"
+          'A longer line so that there is something to stop, on and on for a while.' | & $py -X utf8 $sp read
+          Start-Sleep 3
+          & $py -X utf8 $sp shh
+          if (Test-Path "$env:USERPROFILE\.claude\tts\playing.json") { throw 'shh left playing.json behind' }
+          Set-Clipboard -Value 'Read from the clipboard.'
+          Remove-Item "$env:USERPROFILE\.claude\tts\last.json" -ErrorAction SilentlyContinue
+          & $py -X utf8 $sp clip
+          for ($i = 0; $i -lt 90 -and -not (Test-Path "$env:USERPROFILE\.claude\tts\last.json"); $i++) { Start-Sleep 1 }
+          $item = Get-Content "$env:USERPROFILE\.claude\tts\last.json" -Raw | ConvertFrom-Json
+          if ($item.text -ne 'Read from the clipboard.') { throw "clip read: $($item.text)" }
+          & "$env:USERPROFILE\.claude\tts\bin\tts.cmd" status
+          Write-Host 'shh / clip / tts.cmd OK'
+
+      - name: Hotkey helper starts and registers its hotkeys
+        run: |
+          $pyw = "$env:USERPROFILE\.claude\tts\venv\Scripts\pythonw.exe"
+          $p = Start-Process -FilePath $pyw -ArgumentList "`"$env:USERPROFILE\.claude\tts\ttsd_win.py`"" -PassThru
+          Start-Sleep 5
+          $log = Get-Content "$env:USERPROFILE\.claude\tts\ttsd.log" -Raw -ErrorAction SilentlyContinue
+          Write-Host "ttsd.log: $log"
+          if ($log -notmatch 'listening for') { throw 'ttsd did not register any hotkey' }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Uninstall keeps the other hook
+        run: |
+          & "$env:USERPROFILE\.claude\tts\uninstall.ps1"
+          $s = Get-Content "$env:USERPROFILE\.claude\settings.json" -Raw | ConvertFrom-Json
+          $cmds = @($s.hooks.Stop | ForEach-Object { $_.hooks } | ForEach-Object { $_.command })
+          if ($cmds -notcontains 'echo other-stop-hook') { throw 'uninstall removed someone else''s hook' }
+          if (($cmds -join ' ') -match 'python') { throw 'our hook is still there' }
+          if ($s.hooks.UserPromptSubmit) { throw 'UserPromptSubmit hook not removed' }
+          if (Test-Path "$env:USERPROFILE\.claude\tts") { throw 'kit folder not removed' }
+          Write-Host 'uninstall OK'
