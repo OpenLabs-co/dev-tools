@@ -6,7 +6,7 @@ Browse them, with install commands and Claude Code prompts, at **https://openlux
 
 | Kit | What it does | Platform |
 |---|---|---|
-| [Kokoro Voice for Claude Code](kokoro-voice/) | Claude Code replies and plans read aloud by an offline voice, with global hotkeys and an iTerm2 right-click menu. | macOS |
+| [Kokoro Voice for Claude Code](kokoro-voice/) | Claude Code replies and plans read aloud by an offline voice, with global hotkeys and an iTerm2 right-click menu. | macOS, Windows (beta) |
 
 ## Suggest or contribute a kit
 
