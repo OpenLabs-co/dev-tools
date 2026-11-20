@@ -19,13 +19,14 @@ Modes:
   speak.py last-tty /dev/ttysNNN   Speak the last reply of the Claude session in that tab (macOS/Linux)
   speak.py last     Speak the newest reply from any Claude session
   speak.py clip     Speak whatever text is on the clipboard (copy a selection, then run this)
+  speak.py full-turn  Toggle reading the whole turn (text between tool calls); the default is the main reply only
 
 Runs on macOS and Windows. macOS plays audio with afplay; Windows with the
 built-in winsound module. Paths are the same: ~/.claude/tts on both.
 
 Toggle: replies are only queued while ~/.claude/tts-on exists.
 Config (env vars): KOKORO_VOICE (af_heart), KOKORO_SPEED (1.1),
-KOKORO_MAX_CHARS (1200), KOKORO_PLAN_MAX_CHARS (8000), KOKORO_ANNOUNCE (1 = say the session title)
+KOKORO_MAX_CHARS (20000), KOKORO_PLAN_MAX_CHARS (8000), KOKORO_ANNOUNCE (1 = say the session title)
 """
 
 import json
@@ -52,6 +53,7 @@ else:
 
 HERE = Path(__file__).resolve().parent
 TOGGLE = Path.home() / ".claude" / "tts-on"
+FULL_TURN = Path.home() / ".claude" / "tts-full-turn"            # present = also read the text between tool calls (default: the main reply only)
 QUEUE = HERE / "queue"
 LOCK = HERE / "player.lock"
 PLAYING = HERE / "playing.json"
@@ -62,7 +64,7 @@ PYTHON = HERE / "venv" / ("Scripts/pythonw.exe" if IS_WIN else "bin/python")
 
 VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
 SPEED = float(os.environ.get("KOKORO_SPEED", "1.1"))
-MAX_CHARS = int(os.environ.get("KOKORO_MAX_CHARS", "1200"))
+MAX_CHARS = int(os.environ.get("KOKORO_MAX_CHARS", "20000"))   # the whole main reply
 PLAN_MAX_CHARS = int(os.environ.get("KOKORO_PLAN_MAX_CHARS", "8000"))
 READ_MAX_CHARS = int(os.environ.get("KOKORO_READ_MAX_CHARS", "20000"))
 SESSIONS = Path.home() / ".claude" / "sessions"
@@ -72,7 +74,8 @@ ANNOUNCE = os.environ.get("KOKORO_ANNOUNCE", "1") != "0"
 
 def clean(text: str, limit: int = MAX_CHARS) -> str:
     text = re.sub(r"```.*?```", " ", text, flags=re.S)           # fenced code
-    text = re.sub(r"^\s*\|.*\|\s*$", " ", text, flags=re.M)      # table rows
+    text = re.sub(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$", " ", text, flags=re.M)   # table separator rows
+    text = re.sub(r"^\s*\|(.*)\|\s*$", lambda m: ", ".join(c.strip() for c in m.group(1).split("|") if c.strip()) + ".", text, flags=re.M)  # table rows -> read the cells
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)        # links/images -> label
     text = re.sub(r"https?://\S+", "", text)                      # bare URLs
     text = re.sub(r"`([^`]*)`", r"\1", text)                      # inline code -> content
@@ -96,9 +99,10 @@ def read_transcript(path: str | None) -> tuple[str, str]:
     if not path or not os.path.exists(path):
         return "", ""
     last, ai_title, custom_title = "", "", ""
+    turn: list[str] = []                                            # every assistant text block since the last real user prompt
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            if '"assistant"' not in line and 'Title"' not in line:
+            if '"assistant"' not in line and 'Title"' not in line and '"user"' not in line:
                 continue
             try:
                 entry = json.loads(line)
@@ -109,6 +113,12 @@ def read_transcript(path: str | None) -> tuple[str, str]:
                 ai_title = entry.get("aiTitle") or ai_title
             elif kind == "custom-title":
                 custom_title = entry.get("customTitle") or custom_title
+            elif kind == "user" and not entry.get("isMeta"):
+                c = (entry.get("message") or {}).get("content")
+                real = isinstance(c, str) and c.strip() and not c.lstrip().startswith("<") or (
+                    isinstance(c, list) and any(b.get("type") == "text" and not str(b.get("text", "")).lstrip().startswith("<") for b in c))
+                if real:
+                    turn = []                                       # a new prompt starts a new turn (tool results don't count)
             elif kind == "assistant":
                 m = entry.get("message") or {}
                 content = m.get("content")
@@ -118,7 +128,10 @@ def read_transcript(path: str | None) -> tuple[str, str]:
                 joined = "\n".join(p for p in parts if p.strip())
                 if joined:
                     last = joined
-    return last, custom_title or ai_title
+                    turn.append(joined)
+    if FULL_TURN.exists():                                            # opt in: `tts full-turn` also reads the text between tool calls
+        return ("\n\n".join(turn) or last), custom_title or ai_title
+    return last, custom_title or ai_title                            # default: the main reply only (the final message), in full
 
 
 def spoken_title(title: str, cwd: str | None) -> str:
@@ -187,7 +200,11 @@ def hook() -> None:
         return
     from_transcript, title = read_transcript(payload.get("transcript_path"))
     reply = payload.get("last_assistant_message")
-    text = clean(reply if isinstance(reply, str) and reply.strip() else from_transcript)
+    if FULL_TURN.exists():                                            # the whole turn, opt in
+        full = from_transcript if len(from_transcript or "") >= len(reply or "") else reply
+    else:                                                             # the main reply: the final message, in full
+        full = reply if isinstance(reply, str) and reply.strip() else from_transcript
+    text = clean(full if isinstance(full, str) and full.strip() else (reply or ""))
     if not text:
         return
     enqueue(payload, title, text)
@@ -505,6 +522,14 @@ def clip() -> None:
     play_now(clean(terminal_text(clipboard_text()), READ_MAX_CHARS))
 
 
+def full_turn() -> None:
+    """toggle reading the whole turn (text between tool calls) vs the main reply only (the default)"""
+    if FULL_TURN.exists():
+        FULL_TURN.unlink(); play_now("I'll read just the main reply.")
+    else:
+        FULL_TURN.touch(); play_now("I'll read the whole turn, including the text between steps.")
+
+
 def say() -> None:
     text = sys.stdin.read().strip()
     if text:
@@ -516,5 +541,5 @@ if __name__ == "__main__":
     {
         "hook": hook, "plan": plan, "prompt": prompt, "shh": shh, "skip": skip, "toggle": toggle,
         "replay": replay, "mic-on": mic_on, "mic-off": mic_off, "player": player, "say": say,
-        "read": read, "last-tty": last_tty, "last": last, "clip": clip,
+        "read": read, "last-tty": last_tty, "last": last, "clip": clip, "full-turn": full_turn,
     }[mode]()

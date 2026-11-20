@@ -146,7 +146,7 @@ Remove-Item $mergeFile -Force
 $Pyw = Join-Path $Dest 'venv\Scripts\python.exe'
 Set-Content -Path (Join-Path $Bin 'tts.cmd') -Encoding ASCII -Value @"
 @echo off
-rem Kokoro Voice for Claude Code: tts on ^| off ^| skip ^| shh ^| replay ^| last ^| clip ^| status
+rem Kokoro Voice for Claude Code: tts on ^| off ^| skip ^| shh ^| replay ^| last ^| clip ^| full-turn ^| status
 set S="$Pyw" -X utf8 "$Dest\speak.py"
 if "%1"=="on" ( type nul > "$Claude\tts-on" & echo voice on & goto :eof )
 if "%1"=="off" ( del /q "$Claude\tts-on" 2>nul & %S% shh & echo voice off & goto :eof )
@@ -156,6 +156,7 @@ if "%1"=="stop" ( %S% shh & goto :eof )
 if "%1"=="replay" ( %S% replay & goto :eof )
 if "%1"=="last" ( %S% last & goto :eof )
 if "%1"=="clip" ( %S% clip & goto :eof )
+if "%1"=="full-turn" ( %S% full-turn & goto :eof )
 if exist "$Claude\tts-on" ( echo voice on ) else ( echo voice off )
 "@
 Set-Content -Path (Join-Path $Bin 'shh.cmd') -Encoding ASCII -Value "@echo off`r`ncall `"%~dp0tts.cmd`" shh"

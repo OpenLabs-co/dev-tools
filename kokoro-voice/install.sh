@@ -138,7 +138,7 @@ write_cmd() { # write_cmd <name> <body>; never clobbers someone else's command
   printf '%s\n' "$2" > "$target"; chmod +x "$target"
 }
 write_cmd tts '#!/bin/sh
-# Kokoro Voice for Claude Code: tts on | off | skip | shh | replay | status
+# Kokoro Voice for Claude Code: tts on | off | skip | shh | replay | full-turn | status
 S="$HOME/.claude/tts/venv/bin/python $HOME/.claude/tts/speak.py"
 case "$1" in
   on)   touch "$HOME/.claude/tts-on"; echo "voice on" ;;
@@ -146,9 +146,10 @@ case "$1" in
   skip) $S skip ;;
   shh|stop) $S shh ;;
   replay) $S replay ;;
+  full-turn) $S full-turn ;;
   status|"") [ -f "$HOME/.claude/tts-on" ] && echo "voice on" || echo "voice off"
         echo "queued: $(ls "$HOME"/.claude/tts/queue/*.json 2>/dev/null | wc -l | tr -d " ")" ;;
-  *) echo "usage: tts on|off|skip|shh|replay|status" ;;
+  *) echo "usage: tts on|off|skip|shh|replay|full-turn|status" ;;
 esac'
 write_cmd shh '#!/bin/sh
 exec "$HOME/.local/bin/tts" shh'

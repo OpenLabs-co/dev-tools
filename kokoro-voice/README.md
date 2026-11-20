@@ -58,7 +58,9 @@ Windows Terminal has no right-click menu API, so on Windows you read a selection
   On some Windows keyboard layouts Ctrl+Alt is the same as AltGr. If a hotkey clashes with a character you type, change `KEYS` in `ttsd_win.py`.
 
 - **Read text aloud:** on macOS with iTerm2, right-click → **Read Selection Aloud** or **Read Last Claude Reply** (the newest reply in the tab you clicked). On any system, copy text and run `tts clip`.
-- **Commands:** `tts on`, `tts off`, `tts replay`, `tts last`, `tts clip`, `tts status`, `shh`.
+- **Commands:** `tts on`, `tts off`, `tts replay`, `tts last`, `tts clip`, `tts full-turn`, `tts status`, `shh`.
+- **What gets read:** the main reply, which is Claude's final message, read in full. Tables are read row by row. Run `tts full-turn` to also hear the text Claude writes between tool calls, and run it again to switch back.
+- **Claude Code fullscreen mode (`/tui fullscreen`):** Claude Code draws its own highlight there, so iTerm2 only sees the word under a right-click. Claude Code copies your highlight to the clipboard when you release the mouse, so **Read Selection Aloud** reads the clipboard when iTerm2's selection is one word or empty. You can also hold **Option** while dragging to make a normal iTerm2 selection.
 
 ## How it works
 
@@ -79,7 +81,7 @@ Environment variables, read when speech starts:
 
 - `KOKORO_VOICE`: the voice (default `af_heart`).
 - `KOKORO_SPEED`: the speaking speed (default `1.1`).
-- `KOKORO_MAX_CHARS`: how much of a reply is read (default `1200`).
+- `KOKORO_MAX_CHARS`: how much of a reply is read (default `20000`, so the whole main reply).
 - `KOKORO_PLAN_MAX_CHARS`: how much of a plan is read (default `8000`).
 - `KOKORO_READ_MAX_CHARS`: the limit for read-aloud of selections and the clipboard (default `20000`).
 - `KOKORO_ANNOUNCE`: set to `0` to skip saying the session name.
